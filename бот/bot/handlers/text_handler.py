@@ -69,6 +69,11 @@ async def unknown_command(message: Message):
         parse_mode="HTML",
     )
 
+@router.message(Command("scanlink"))
+async def cmd_scanlink(message: Message, state: FSMContext):
+    await state.set_state(ScanStates.waiting_for_link)
+    await message.answer("Пришлите ссылку, которую нужно проверить.\n(или /stop, чтобы отменить)")
+
 @router.message()
 async def handle_text(message: Message):
     text = (message.text or "").strip()
