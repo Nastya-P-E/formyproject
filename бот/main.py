@@ -1,15 +1,16 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from bot.handlers import text_handler
-
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +20,7 @@ logging.basicConfig(
 
 async def main():
     token = os.getenv("BOT_TOKEN")
-    if not token:
+    if not token or token == "your_bot_token_here":
         raise RuntimeError("BOT_TOKEN не найден в .env")
 
     bot = Bot(token=token)

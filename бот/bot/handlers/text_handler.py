@@ -1,3 +1,6 @@
+import asyncio
+from html import escape
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -44,7 +47,7 @@ def _format_url_result(url: str) -> str:
     lines = [
         f"{VERDICT_EMOJI[r.verdict]} <b>{VERDICT_LABEL[r.verdict]}</b> — "
         f"оценка подозрительности: {r.score}/100",
-        f"Ссылка: <code>{url[:100]}</code>",
+        f"Ссылка: <code>{escape(url[:100])}</code>",
         "━━━━━━━━━━━━",
     ]
     if not r.signals:
@@ -56,7 +59,25 @@ def _format_url_result(url: str) -> str:
         if r.is_suspicious:
             lines.append("")
             lines.append("⚠️ Не переходите по этой ссылке.")
+    statuses = {
+        "disabled": "VirusTotal отключён: выполнена только проверка адреса по правилам.",
+        "not_configured": "VirusTotal не настроен: отсутствует API-ключ.",
+        "private_url": "Локальный адрес не отправлен в VirusTotal.",
+        "not_found": "В VirusTotal нет готового отчёта. Адрес на сканирование не отправлялся.",
+        "pending": "В VirusTotal пока нет завершённого результата.",
+        "error": "VirusTotal недоступен: выполнена только проверка по правилам.",
+        "completed": "Учтён ранее созданный отчёт VirusTotal; он может быть устаревшим.",
+    }
+    lines.append(statuses[r.vt_status])
     return "\n".join(lines)
+
+
+async def _url_response(url: str) -> str:
+    try:
+        # Blocking HTTP must not stop the event loop for other messages.
+        return await asyncio.to_thread(_format_url_result, url)
+    except ValueError as exc:
+        return "❌ " + escape(str(exc))
 
 
 @router.message(Command("start"))
@@ -84,7 +105,10 @@ async def cmd_help(message: Message):
         "/help — эта справка\n\n"
         "Число 0–100 — внутренняя оценка на основе правил, "
         "а не вероятность мошенничества.\n"
-        "Отсутствие совпадений не гарантирует безопасность сообщения.",
+        "Отсутствие совпадений не гарантирует безопасность сообщения.\n"
+        "По умолчанию ссылки проверяются локально, без открытия сайтов.\n"
+        "Если владелец включил VirusTotal, адрес передаётся этому сервису для поиска готового отчёта.\n"
+        "Не присылайте приватные ссылки и ссылки с паролями или кодами доступа.",
     )
 
 
@@ -121,7 +145,7 @@ async def cmd_stop(message: Message, state: FSMContext):
 async def unknown_command(message: Message):
     cmd = message.text.split()[0]
     await message.answer(
-        f"❌ Некорректная команда: <code>{cmd}</code>\n\n"
+        f"❌ Некорректная команда: <code>{escape(cmd)}</code>\n\n"
         "Доступные команды:\n"
         "/start, /scanmessage, /scanlink, /stop, /help",
         parse_mode="HTML",
@@ -150,7 +174,7 @@ async def handle_text(message: Message, state: FSMContext):
     current = await state.get_state()
 
     if current == ScanStates.waiting_for_link.state:
-        reply = _format_url_result(text)
+        reply = await _url_response(text)
         await message.reply(reply, parse_mode="HTML", disable_web_page_preview=True)
         await state.clear()
         return
@@ -159,7 +183,7 @@ async def handle_text(message: Message, state: FSMContext):
 
     urls = extract_urls(text)
     for u in urls[:3]:
-        reply += "\n\n" + _format_url_result(u)
+        reply += "\n\n" + await _url_response(u)
 
     await message.reply(reply, parse_mode="HTML", disable_web_page_preview=True)
 

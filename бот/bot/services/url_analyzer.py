@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import ipaddress
+import base64
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -9,7 +11,7 @@ import tldextract
 import requests
 
 
-VIRUSTOTAL_API_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
+_EXTRACT = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
 VT_URL = "https://www.virustotal.com/api/v3/urls"
 
 SHORTENERS = {
@@ -47,24 +49,51 @@ class UrlAnalysisResult:
     verdict: str
     signals: list[UrlSignal] = field(default_factory=list)
     vt_stats: dict | None = None
+    vt_status: str = "disabled"
 
     @property
     def is_suspicious(self) -> bool:
         return self.verdict in ("medium", "high")
 
+def validate_url(url: str) -> str:
+    """Accept only a single public HTTP(S) address; never visit the address."""
+    url = url.strip()
+    if not url or any(c.isspace() or ord(c) < 32 for c in url):
+        raise ValueError("Пришлите одну ссылку без пробелов.")
+    if any(c in url for c in '<>\"'):
+        raise ValueError("В ссылке есть недопустимые символы.")
+    if "://" not in url:
+        url = "https://" + url
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        _ = parsed.port  # Validate the port even though no connection is made.
+        if parsed.scheme.lower() not in ("http", "https") or not host:
+            raise ValueError()
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError()
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            ascii_host = host.encode("idna").decode("ascii")
+            labels = ascii_host.rstrip(".").split(".")
+            if len(labels) < 2 or len(ascii_host) > 253 or any(
+                not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                for label in labels
+            ):
+                raise ValueError()
+        return url
+    except (ValueError, UnicodeError):
+        raise ValueError("Некорректная ссылка. Пришлите адрес вида https://example.com.") from None
+
+
 def _extract_parts(url: str):
-    """Возвращает (scheme, host, path, registered_domain, subdomain, tld)."""
-    parsed = urlparse(url if "://" in url else "http://" + url)
-    ext = tldextract.extract(parsed.netloc)
+    parsed = urlparse(validate_url(url))
+    host = parsed.hostname or ""
+    ext = _EXTRACT(host)
     registered = ".".join(p for p in (ext.domain, ext.suffix) if p)
-    return (
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        registered,
-        ext.subdomain,
-        ext.suffix,
-    )
+    return parsed.scheme, host, parsed.path, registered, ext.subdomain, ext.suffix
+
 
 def _check_local(url: str) -> list[UrlSignal]:
     signals: list[UrlSignal] = []
@@ -78,8 +107,12 @@ def _check_local(url: str) -> list[UrlSignal]:
             f"Сокращённая ссылка ({registered}) — реальный адрес скрыт",
         ))
 
-    host_no_port = host.split(":")[0]
-    if _IP_RE.match(host_no_port):
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    if is_ip:
         signals.append(UrlSignal(
             "ip_host", 0.6,
             "Ссылка ведёт на IP-адрес, а не на домен",
@@ -144,49 +177,46 @@ def _check_local(url: str) -> list[UrlSignal]:
 
     return signals
 
-def _check_virustotal(url: str, timeout: int = 10) -> tuple[list[UrlSignal], dict | None]:
-    """Возвращает сигналы VT и сырую статистику (или None, если ключа нет/ошибка)."""
-    if not VIRUSTOTAL_API_KEY:
-        return [], None
-
+def _check_virustotal(url: str, timeout: int = 5) -> tuple[list[UrlSignal], dict | None, str]:
+    """Read an existing report only; do not submit URLs for a new scan."""
+    if os.getenv("VIRUSTOTAL_ENABLED", "").lower() != "true":
+        return [], None, "disabled"
+    key = os.getenv("VIRUSTOTAL_API_KEY", "")
+    if not key:
+        return [], None, "not_configured"
+    # Avoid sending local/private addresses to an external service.
+    host = urlparse(url).hostname or ""
     try:
-        resp = requests.post(
-            VT_URL,
-            headers={"x-apikey": VIRUSTOTAL_API_KEY},
-            data={"url": url},
-            timeout=timeout,
-        )
-        if resp.status_code != 200:
-            return [], None
-
-        analysis_id = resp.json()["data"]["id"]
+        if not ipaddress.ip_address(host).is_global:
+            return [], None, "private_url"
+    except ValueError:
+        if host.endswith((".local", ".localhost", ".internal")):
+            return [], None, "private_url"
+    url_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    try:
         report = requests.get(
-            f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
-            headers={"x-apikey": VIRUSTOTAL_API_KEY},
-            timeout=timeout,
+            f"{VT_URL}/{url_id}", headers={"x-apikey": key}, timeout=timeout,
         )
+        if report.status_code == 404:
+            return [], None, "not_found"
         if report.status_code != 200:
-            return [], None
-
-        stats = report.json()["data"]["attributes"].get("stats", {})
+            return [], None, "error"
+        attrs = report.json()["data"]["attributes"]
+        stats = attrs.get("last_analysis_stats")
+        if not isinstance(stats, dict) or not stats or not any(stats.values()):
+            return [], None, "pending"
         malicious = stats.get("malicious", 0)
         suspicious = stats.get("suspicious", 0)
-
-        signals: list[UrlSignal] = []
+        signals = []
         if malicious > 0:
-            signals.append(UrlSignal(
-                "vt_malicious", min(malicious / 10, 1.0),
-                f"VirusTotal: {malicious} движков считают ссылку вредоносной",
-            ))
+            signals.append(UrlSignal("vt_malicious", max(0.6, min(malicious / 10, 1.0)),
+                                    f"VirusTotal: {malicious} движков считают ссылку вредоносной"))
         if suspicious > 0:
-            signals.append(UrlSignal(
-                "vt_suspicious", min(suspicious / 15, 0.7),
-                f"VirusTotal: {suspicious} движков считают ссылку подозрительной",
-            ))
-
-        return signals, stats
-    except Exception:
-        return [], None
+            signals.append(UrlSignal("vt_suspicious", max(0.3, min(suspicious / 15, 0.7)),
+                                    f"VirusTotal: {suspicious} движков считают ссылку подозрительной"))
+        return signals, stats, "completed"
+    except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError):
+        return [], None, "error"
 
 
 def _aggregate(signals: list[UrlSignal]) -> float:
@@ -206,15 +236,14 @@ def _verdict(score: float) -> str:
     return "low"
 
 def analyze_url(url: str, use_virustotal: bool = True) -> UrlAnalysisResult:
-    url = url.strip()
-    if not url:
-        return UrlAnalysisResult(url="", score=0.0, verdict="low")
+    url = validate_url(url)
 
     signals = _check_local(url)
 
     vt_stats = None
+    vt_status = "disabled"
     if use_virustotal:
-        vt_signals, vt_stats = _check_virustotal(url)
+        vt_signals, vt_stats, vt_status = _check_virustotal(url)
         signals.extend(vt_signals)
 
     signals.sort(key=lambda s: s.score, reverse=True)
@@ -225,6 +254,7 @@ def analyze_url(url: str, use_virustotal: bool = True) -> UrlAnalysisResult:
         verdict=_verdict(score),
         signals=signals,
         vt_stats=vt_stats,
+        vt_status=vt_status,
     )
 
 
