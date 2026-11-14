@@ -111,5 +111,37 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
             finally:release.set()
             await task
 
+    async def test_three_documents_queue_without_loop_errors(self):
+        from bot.handlers import text_handler as handlers
+        from unittest.mock import AsyncMock
+        ready, release = asyncio.Event(), asyncio.Event()
+        active, maximum = 0, 0
+        async def analyze(*a, **k):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(active, maximum)
+            if active == 2:
+                ready.set()
+            try:
+                await release.wait()
+                return files.FileAnalysisResult(filename='test.txt', size=1, sha256='abc')
+            finally:
+                active -= 1
+        messages = [SimpleNamespace(bot=self.bot,
+                    document=SimpleNamespace(file_id='id',file_name='test.txt',file_size=1),
+                    answer=AsyncMock(), reply=AsyncMock()) for _ in range(3)]
+        with patch.object(handlers,'analyze_document',analyze):
+            tasks=[asyncio.create_task(handlers.handle_document(m,AsyncMock())) for m in messages]
+            try:
+                await asyncio.wait_for(ready.wait(),1)
+                await asyncio.sleep(0)
+                self.assertEqual(maximum,2)
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+        for message in messages:
+            message.reply.assert_awaited_once()
+            self.assertIn('SHA-256',message.reply.call_args.args[0])
+
 
 if __name__=='__main__':unittest.main()
