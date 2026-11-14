@@ -10,6 +10,7 @@
 - `/help` — подсказка по использованию.
 - `/scanmessage` — приглашение отправить текст на проверку.
 - `/scanlink` — проверка адреса ссылки.
+- `/scanfile` — проверка файла на вредоносное ПО.
 - `/stop` — отмена текущего режима.
 - Текстовые сообщения — проверка по шаблонам и регулярным выражениям.
 - До трёх ссылок из текста — дополнительная проверка адресов.
@@ -55,6 +56,9 @@
 | [бот/bot/handlers/text_handler.py](бот/bot/handlers/text_handler.py) | Команды, приём текста и оформление ответа |
 | [бот/bot/services/text_analyzer.py](бот/bot/services/text_analyzer.py) | Сравнение текста с шаблонами и расчёт балла |
 | [бот/bot/services/scam_patterns.py](бот/bot/services/scam_patterns.py) | Шаблоны сообщений и регулярные выражения |
+| [бот/bot/services/url_analyzer.py](бот/bot/services/url_analyzer.py) | Проверка адреса ссылки |
+| [бот/bot/services/file_analyzer.py](бот/bot/services/file_analyzer.py) | Анализ файла на вредоносное ПО |
+
 
 ## Необязательная интеграция VirusTotal
 
