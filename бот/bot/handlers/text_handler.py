@@ -81,6 +81,7 @@ async def cmd_help(message: Message):
         "/start — запустить бота\n"
         "/scanmessage — проверить сообщение\n"
         "/scanlink — проверить ссылку\n"
+        "/scanfile — проверить файл\n"
         "/stop — остановить проверку\n"
         "/help — эта справка\n\n"
         "Также можно просто прислать файл — я проверю его по базам "
@@ -132,7 +133,7 @@ async def unknown_command(message: Message):
     await message.answer(
         f"❌ Некорректная команда: <code>{cmd}</code>\n\n"
         "Доступные команды:\n"
-        "/start, /scanmessage, /scanlink, /stop, /help",
+        "/start, /scanmessage, /scanlink, /scanfile, /stop, /help",
         parse_mode="HTML",
     )
 
