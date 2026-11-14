@@ -166,7 +166,18 @@ async def unknown_command(message: Message):
     )
 
 
-_FILE_SLOTS = asyncio.Semaphore(2)
+_FILE_SLOTS = None
+_FILE_LOOP = None
+
+
+def _document_slots():
+    # Python 3.9 binds Semaphore to the loop at construction time.
+    global _FILE_SLOTS, _FILE_LOOP
+    loop = asyncio.get_running_loop()
+    if _FILE_LOOP is not loop:
+        _FILE_SLOTS = asyncio.Semaphore(2)
+        _FILE_LOOP = loop
+    return _FILE_SLOTS
 
 
 def _format_file_result(result):
@@ -193,7 +204,7 @@ def _format_file_result(result):
 async def handle_document(message: Message, state: FSMContext):
     await message.answer("⏳ Проверяю файл. Без внешних ключей доступны только признаки имени и SHA-256.")
     try:
-        async with _FILE_SLOTS:
+        async with _document_slots():
             result = await analyze_document(message.bot, message.document.file_id,
                                             filename=message.document.file_name,
                                             file_size=message.document.file_size)
