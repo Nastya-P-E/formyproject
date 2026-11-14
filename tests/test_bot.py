@@ -8,7 +8,7 @@ from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'бот'))
 from aiogram import Bot, Dispatcher
-from aiogram.types import Chat, Message, MessageEntity, Update, User, Document
+from aiogram.types import Chat, Message, MessageEntity, Update, User, Document, PhotoSize
 from bot.services import url_analyzer as urls
 from bot.handlers import text_handler as handlers
 
@@ -61,12 +61,12 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         dp.include_router(handlers.router)
         replies = []
         async def capture(message, text, **kwargs): replies.append(text)
-        async def send(text=None, document=None):
+        async def send(text=None, document=None, photo=None):
             replies.clear()
             entities = [MessageEntity(type='bot_command', offset=0, length=len(text.split()[0]))] if text and text.startswith('/') else []
             message = Message(message_id=1, date=datetime.now(timezone.utc),
                               chat=Chat(id=42,type='private'),from_user=User(id=42,is_bot=False,first_name='Test'),
-                              text=text,entities=entities,document=document)
+                              text=text,entities=entities,document=document,photo=photo)
             await dp.feed_update(bot, Update(update_id=1,message=message))
             self.assertTrue(replies)
             return replies[0]
@@ -84,7 +84,22 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
                 await send('/scanlink')
                 self.assertIn('остановлена', await send('/stop'))
                 self.assertIn('&lt;b&gt;', await send('/<b>'))
-                self.assertIn('только текст', await send(document=Document(file_id='test',file_unique_id='test')))
+                self.assertIn('Фото', await send(photo=[PhotoSize(file_id='test',file_unique_id='test',width=10,height=10)]))
+                await send('/scanfile')
+                self.assertIn('Ожидаю документ', await send('текст вместо файла'))
+                self.assertIn('остановлена', await send('/stop'))
+                from types import SimpleNamespace
+                async def download(self, file_path, destination, **kwargs):
+                    destination.write(b'harmless test')
+                async def get_file(self, file_id):
+                    return SimpleNamespace(file_path='dummy')
+                with patch.object(Bot,'get_file',get_file), patch.object(Bot,'download_file',download), patch.dict(os.environ, {'MALWAREBAZAAR_ENABLED':'false'}):
+                    await send('/scanfile')
+                    await send(document=Document(file_id='test',file_unique_id='test',file_name='<b>report.txt',file_size=13))
+                    self.assertIn('SHA-256', replies[-1])
+                    self.assertIn('&lt;b&gt;report.txt', replies[-1])
+                    self.assertIn('Безопасность не определена', replies[-1])
+                    self.assertIn('отключён', replies[-1])
         finally:
             await dp.storage.close()
             await bot.session.close()
