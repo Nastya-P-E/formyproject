@@ -1,6 +1,3 @@
-import asyncio
-from html import escape
-
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -9,6 +6,7 @@ from aiogram.types import Message
 
 from bot.services.text_analyzer import analyze_text
 from bot.services.url_analyzer import analyze_url, extract_urls
+from bot.services.file_analyzer import analyze_document
 
 
 router = Router(name="text_handler")
@@ -47,7 +45,7 @@ def _format_url_result(url: str) -> str:
     lines = [
         f"{VERDICT_EMOJI[r.verdict]} <b>{VERDICT_LABEL[r.verdict]}</b> — "
         f"оценка подозрительности: {r.score}/100",
-        f"Ссылка: <code>{escape(url[:100])}</code>",
+        f"Ссылка: <code>{url[:100]}</code>",
         "━━━━━━━━━━━━",
     ]
     if not r.signals:
@@ -59,25 +57,7 @@ def _format_url_result(url: str) -> str:
         if r.is_suspicious:
             lines.append("")
             lines.append("⚠️ Не переходите по этой ссылке.")
-    statuses = {
-        "disabled": "VirusTotal отключён: выполнена только проверка адреса по правилам.",
-        "not_configured": "VirusTotal не настроен: отсутствует API-ключ.",
-        "private_url": "Локальный адрес не отправлен в VirusTotal.",
-        "not_found": "В VirusTotal нет готового отчёта. Адрес на сканирование не отправлялся.",
-        "pending": "В VirusTotal пока нет завершённого результата.",
-        "error": "VirusTotal недоступен: выполнена только проверка по правилам.",
-        "completed": "Учтён ранее созданный отчёт VirusTotal; он может быть устаревшим.",
-    }
-    lines.append(statuses[r.vt_status])
     return "\n".join(lines)
-
-
-async def _url_response(url: str) -> str:
-    try:
-        # Blocking HTTP must not stop the event loop for other messages.
-        return await asyncio.to_thread(_format_url_result, url)
-    except ValueError as exc:
-        return "❌ " + escape(str(exc))
 
 
 @router.message(Command("start"))
@@ -103,12 +83,10 @@ async def cmd_help(message: Message):
         "/scanlink — проверить ссылку\n"
         "/stop — остановить проверку\n"
         "/help — эта справка\n\n"
+        "Также можно просто прислать файл — я проверю его по базам "
+        "VirusTotal и MalwareBazaar по хэшу, не загружая содержимое.\n\n"
         "Число 0–100 — внутренняя оценка на основе правил, "
-        "а не вероятность мошенничества.\n"
-        "Отсутствие совпадений не гарантирует безопасность сообщения.\n"
-        "По умолчанию ссылки проверяются локально, без открытия сайтов.\n"
-        "Если владелец включил VirusTotal, адрес передаётся этому сервису для поиска готового отчёта.\n"
-        "Не присылайте приватные ссылки и ссылки с паролями или кодами доступа.",
+        "а не вероятность мошенничества.",
     )
 
 
@@ -127,6 +105,13 @@ async def cmd_scanlink(message: Message, state: FSMContext):
         "Пришлите ссылку, которую нужно проверить.\n(или /stop, чтобы отменить)"
     )
 
+@router.message(Command("scanfile"))
+async def cmd_scanfile(message: Message):
+    await message.answer(
+        "Пришлите ваш файл, пожалуйста.\n"
+        "Я проверю его по базам VirusTotal и MalwareBazaar по хэшу, "
+        "не загружая содержимое."
+    )
 
 @router.message(Command("stop"))
 async def cmd_stop(message: Message, state: FSMContext):
@@ -145,19 +130,61 @@ async def cmd_stop(message: Message, state: FSMContext):
 async def unknown_command(message: Message):
     cmd = message.text.split()[0]
     await message.answer(
-        f"❌ Некорректная команда: <code>{escape(cmd)}</code>\n\n"
+        f"❌ Некорректная команда: <code>{cmd}</code>\n\n"
         "Доступные команды:\n"
         "/start, /scanmessage, /scanlink, /stop, /help",
         parse_mode="HTML",
     )
 
+@router.message(F.document)
+async def handle_document(message: Message, state: FSMContext):
+    doc = message.document
+    await message.answer("⏳ Проверяю файл, подождите…")
 
-@router.message(F.text.is_(None))
-async def non_text_message(message: Message):
+    try:
+        result = await analyze_document(
+            bot=message.bot,
+            file_id=doc.file_id,
+            file_name=doc.file_name,
+            file_size=doc.file_size,
+        )
+    except Exception as e:
+        await message.reply(f"Не удалось проверить файл: {e}")
+        return
+
+    emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}[result.verdict]
+    label = {"low": "Низкий риск", "medium": "Средний риск", "high": "Высокий риск"}[result.verdict]
+
+    lines = [
+        f"{emoji} <b>{label}</b> — оценка подозрительности: {result.score}/100",
+        f"Файл: <code>{result.filename}</code>",
+        f"SHA-256: <code>{result.sha256[:32]}…</code>",
+        "━━━━━━━━━━━━",
+    ]
+    if not result.signals:
+        lines.append("Признаков вредоносного содержимого не найдено.")
+        lines.append("Безопасность файла не подтверждена.")
+    else:
+        lines.append("<b>Найденные признаки:</b>")
+        for sig in result.signals[:3]:
+            lines.append(f"• {sig.reason}")
+
+    if result.is_suspicious:
+        lines.append("")
+        lines.append("⚠️ Не открывайте файл. Удалите его и проверьте отправителя.")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+    await state.clear()
+
+@router.message(F.text.startswith("/"))
+async def unknown_command(message: Message):
+    cmd = message.text.split()[0]
     await message.answer(
-        "❌ Некорректный формат сообщения.\n"
-        "Я умею проверять только текст и ссылки.\n"
-        "Пришлите текст сообщения или ссылку.",
+        f"❌ Некорректная команда: <code>{cmd}</code>\n\n"
+        "Доступные команды:\n"
+        "/start, /scanmessage, /scanlink, /scanfile, /stop, /help",
+        parse_mode="HTML",
     )
 
 
@@ -174,7 +201,7 @@ async def handle_text(message: Message, state: FSMContext):
     current = await state.get_state()
 
     if current == ScanStates.waiting_for_link.state:
-        reply = await _url_response(text)
+        reply = _format_url_result(text)
         await message.reply(reply, parse_mode="HTML", disable_web_page_preview=True)
         await state.clear()
         return
@@ -183,7 +210,7 @@ async def handle_text(message: Message, state: FSMContext):
 
     urls = extract_urls(text)
     for u in urls[:3]:
-        reply += "\n\n" + await _url_response(u)
+        reply += "\n\n" + _format_url_result(u)
 
     await message.reply(reply, parse_mode="HTML", disable_web_page_preview=True)
 
