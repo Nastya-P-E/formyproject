@@ -68,6 +68,7 @@ async def cmd_start(message: Message, state: FSMContext):
         "Команды:\n"
         "/scanmessage — проверить текст сообщения\n"
         "/scanlink — проверить ссылку\n"
+        "/scanfile — проверить файл\n"
         "/stop — отменить проверку\n"
         "/help — справка\n\n"
         "Или просто пришли мне текст — я его проверю.",
