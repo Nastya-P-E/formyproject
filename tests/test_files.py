@@ -143,5 +143,21 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
             message.reply.assert_awaited_once()
             self.assertIn('SHA-256',message.reply.call_args.args[0])
 
+    async def test_vt_key_is_read_when_requested(self):
+        with patch.dict(os.environ, {'VIRUSTOTAL_API_KEY':'first-test-key'}):
+            self.assertEqual(files._get_vt_key(),'first-test-key')
+        with patch.dict(os.environ, {'VIRUSTOTAL_API_KEY':'second-test-key'}):
+            self.assertEqual(files._get_vt_key(),'second-test-key')
+
+    async def test_file_result_and_handler_status_contract(self):
+        from bot.handlers import text_handler as handlers
+        r=await files.analyze_document(self.bot,'id','test.txt',13)
+        answer=handlers._format_file_result(r)
+        self.assertIn('VirusTotal: отключён',answer)
+        self.assertIn('MalwareBazaar: отключён',answer)
+        self.assertIn('Безопасность не определена',answer)
+        self.assertIn('SHA-256',answer)
+        self.assertNotIn('/100',answer)
+
 
 if __name__=='__main__':unittest.main()
